@@ -19,7 +19,6 @@ package plugin
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -30,12 +29,16 @@ import (
 	"k8s.io/client-go/kubernetes"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
+
+	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	velerov1client "github.com/vmware-tanzu/velero/pkg/generated/clientset/versioned/typed/velero/v1"
 )
 
 // RestorePlugin is a restore item action plugin for Velero
 type RestorePlugin struct {
 	logger          logrus.FieldLogger
 	configMapClient corev1.ConfigMapInterface
+	veleroClient    velerov1client.VeleroV1Interface
 }
 
 // NewRestorePlugin instantiates a RestorePlugin.
@@ -51,9 +54,15 @@ func NewRestorePlugin(logger logrus.FieldLogger) *RestorePlugin {
 	}
 	configMapClient := clientset.CoreV1().ConfigMaps("velero")
 
+	veleroClient, err := velerov1client.NewForConfig(config)
+	if err != nil {
+		logger.Fatalf("Failed to create Velero client: %v", err)
+	}
+
 	return &RestorePlugin{
 		logger:          logger,
 		configMapClient: configMapClient,
+		veleroClient:    veleroClient,
 	}
 }
 
@@ -74,7 +83,21 @@ func (p *RestorePlugin) Execute(input *velero.RestoreItemActionExecuteInput) (*v
 		return velero.NewRestoreItemActionExecuteOutput(input.Item), nil // Continue without applying the plugin logic if ConfigMap is not found
 	}
 
-	return replacePatternAction(p, input, patterns)
+	output, err := replacePatternAction(p, input, patterns)
+	if err != nil {
+		return nil, err
+	}
+
+	// Trigger podvolumerestore manually
+	modifiedItem, ok := output.UpdatedItem.(*unstructured.Unstructured)
+	if !ok {
+		return nil, fmt.Errorf("failed to assert type to *unstructured.Unstructured")
+	}
+	if err := p.triggerPodVolumeRestore(input, modifiedItem); err != nil {
+		p.logger.Warnf("Failed to trigger podvolumerestore: %v", err)
+	}
+
+	return output, nil
 }
 
 func (p *RestorePlugin) getConfigMapDataByLabel(labelSelector string) (map[string]string, error) {
@@ -103,18 +126,7 @@ func (p *RestorePlugin) getConfigMapDataByLabel(labelSelector string) (map[strin
 func replacePatternAction(p *RestorePlugin, input *velero.RestoreItemActionExecuteInput, patterns map[string]string) (*velero.RestoreItemActionExecuteOutput, error) {
 	p.logger.Infof("Executing ReplacePatternAction on %v", input.Item.GetObjectKind().GroupVersionKind().Kind)
 
-	unstructuredObj := input.Item.UnstructuredContent()
-	if unstructuredObj == nil {
-		return nil, errors.New("unable to convert item to unstructured")
-	}
-
-	spec, ok, err := unstructured.NestedMap(unstructuredObj, "spec")
-	if err != nil || !ok {
-		return nil, errors.New("unable to get spec from unstructured object")
-	}
-
-	// Convert the spec to JSON
-	jsonData, err := json.Marshal(spec)
+	jsonData, err := json.Marshal(input.Item)
 	if err != nil {
 		return nil, err
 	}
@@ -124,15 +136,38 @@ func replacePatternAction(p *RestorePlugin, input *velero.RestoreItemActionExecu
 		modifiedString = strings.ReplaceAll(modifiedString, pattern, replacement)
 	}
 
-	// Unmarshal the modified JSON back into a map
-	var modifiedSpec map[string]interface{}
-	if err := json.Unmarshal([]byte(modifiedString), &modifiedSpec); err != nil {
+	// Create a new item from the modified JSON data
+	var modifiedObj unstructured.Unstructured
+	if err := json.Unmarshal([]byte(modifiedString), &modifiedObj); err != nil {
 		return nil, err
 	}
+	return velero.NewRestoreItemActionExecuteOutput(&modifiedObj), nil
+}
 
-	if err := unstructured.SetNestedMap(unstructuredObj, modifiedSpec, "spec"); err != nil {
-		return nil, err
+func (p *RestorePlugin) triggerPodVolumeRestore(input *velero.RestoreItemActionExecuteInput, modifiedItem *unstructured.Unstructured) error {
+	// Check if the resource is a Pod and trigger podvolumerestore logic
+	if modifiedItem.GetKind() == "Pod" {
+		namespace := modifiedItem.GetNamespace()
+		name := modifiedItem.GetName()
+		labels := modifiedItem.GetLabels()
+
+		pvrList, err := p.veleroClient.PodVolumeRestores(namespace).List(context.TODO(), metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("velero.io/restore-name=%s,velero.io/restore-uid=%s", labels["velero.io/restore-name"], labels["velero.io/restore-uid"]),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to list PodVolumeRestores: %v", err)
+		}
+
+		for _, pvr := range pvrList.Items {
+			if pvr.Spec.Pod.Name == name {
+				pvrCopy := pvr.DeepCopy()
+				pvrCopy.Status.Phase = velerov1api.PodVolumeRestorePhaseInProgress
+				_, err := p.veleroClient.PodVolumeRestores(namespace).UpdateStatus(context.TODO(), pvrCopy, metav1.UpdateOptions{})
+				if err != nil {
+					return fmt.Errorf("failed to update PodVolumeRestore status: %v", err)
+				}
+			}
+		}
 	}
-
-	return velero.NewRestoreItemActionExecuteOutput(&unstructured.Unstructured{Object: unstructuredObj}), nil
+	return nil
 }
