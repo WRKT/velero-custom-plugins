@@ -19,6 +19,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -102,7 +103,18 @@ func (p *RestorePlugin) getConfigMapDataByLabel(labelSelector, namespace string)
 func replacePatternAction(p *RestorePlugin, input *velero.RestoreItemActionExecuteInput, patterns map[string]string) (*velero.RestoreItemActionExecuteOutput, error) {
 	p.logger.Infof("Executing ReplacePatternAction on %v", input.Item.GetObjectKind().GroupVersionKind().Kind)
 
-	jsonData, err := json.Marshal(input.Item)
+	unstructuredObj := input.Item.UnstructuredContent()
+	if unstructuredObj == nil {
+		return nil, errors.New("unable to convert item to unstructured")
+	}
+
+	spec, ok, err := unstructured.NestedMap(unstructuredObj, "spec")
+	if err != nil || !ok {
+		return nil, errors.New("unable to get spec from unstructured object")
+	}
+
+	// Convert the spec to JSON
+	jsonData, err := json.Marshal(spec)
 	if err != nil {
 		return nil, err
 	}
@@ -112,10 +124,15 @@ func replacePatternAction(p *RestorePlugin, input *velero.RestoreItemActionExecu
 		modifiedString = strings.ReplaceAll(modifiedString, pattern, replacement)
 	}
 
-	// Create a new item from the modified JSON data
-	var modifiedObj unstructured.Unstructured
-	if err := json.Unmarshal([]byte(modifiedString), &modifiedObj); err != nil {
+	// Unmarshal the modified JSON back into a map
+	var modifiedSpec map[string]interface{}
+	if err := json.Unmarshal([]byte(modifiedString), &modifiedSpec); err != nil {
 		return nil, err
 	}
-	return velero.NewRestoreItemActionExecuteOutput(&modifiedObj), nil
+
+	if err := unstructured.SetNestedMap(unstructuredObj, modifiedSpec, "spec"); err != nil {
+		return nil, err
+	}
+
+	return velero.NewRestoreItemActionExecuteOutput(&unstructured.Unstructured{Object: unstructuredObj}), nil
 }
