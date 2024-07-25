@@ -93,7 +93,7 @@ func (p *RestorePlugin) Execute(input *velero.RestoreItemActionExecuteInput) (*v
 	if !ok {
 		return nil, fmt.Errorf("failed to assert type to *unstructured.Unstructured")
 	}
-	if err := p.triggerPodVolumeRestore(input, modifiedItem); err != nil {
+	if err := p.triggerPodVolumeRestore(modifiedItem); err != nil {
 		p.logger.Warnf("Failed to trigger podvolumerestore: %v", err)
 	}
 
@@ -144,7 +144,7 @@ func replacePatternAction(p *RestorePlugin, input *velero.RestoreItemActionExecu
 	return velero.NewRestoreItemActionExecuteOutput(&modifiedObj), nil
 }
 
-func (p *RestorePlugin) triggerPodVolumeRestore(input *velero.RestoreItemActionExecuteInput, modifiedItem *unstructured.Unstructured) error {
+func (p *RestorePlugin) triggerPodVolumeRestore(modifiedItem *unstructured.Unstructured) error {
 	// Check if the resource is a Pod and trigger podvolumerestore logic
 	if modifiedItem.GetKind() == "Pod" {
 		namespace := modifiedItem.GetNamespace()
