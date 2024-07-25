@@ -62,7 +62,7 @@ func TestRestorePlugin_Execute(t *testing.T) {
 			},
 		}, nil)
 
-	yamlFile, err := os.ReadFile("./mock-data/sample-ingress.yaml")
+	yamlFile, err := os.ReadFile("./mock-data/pod-sample.yaml")
 	if err != nil {
 		t.Fatalf("Failed to read YAML file: %v", err)
 	}

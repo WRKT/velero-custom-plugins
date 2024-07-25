@@ -132,8 +132,18 @@ func replacePatternAction(p *RestorePlugin, input *velero.RestoreItemActionExecu
 	}
 
 	modifiedString := string(jsonData)
+	var originalName string
+
+	if input.Item.GetObjectKind().GroupVersionKind().Kind == "Pod" {
+		originalName = extractMetadataName(jsonData)
+	}
+
 	for pattern, replacement := range patterns {
 		modifiedString = strings.ReplaceAll(modifiedString, pattern, replacement)
+	}
+
+	if input.Item.GetObjectKind().GroupVersionKind().Kind == "Pod" {
+		modifiedString = restoreMetadataName(modifiedString, originalName)
 	}
 
 	// Create a new item from the modified JSON data
@@ -144,15 +154,54 @@ func replacePatternAction(p *RestorePlugin, input *velero.RestoreItemActionExecu
 	return velero.NewRestoreItemActionExecuteOutput(&modifiedObj), nil
 }
 
+func extractMetadataName(jsonData []byte) string {
+	var obj map[string]interface{}
+	if err := json.Unmarshal(jsonData, &obj); err != nil {
+		return ""
+	}
+
+	if metadata, ok := obj["metadata"].(map[string]interface{}); ok {
+		if name, ok := metadata["name"].(string); ok {
+			return name
+		}
+	}
+	return ""
+}
+
+func restoreMetadataName(modifiedString, originalName string) string {
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(modifiedString), &obj); err != nil {
+		return modifiedString
+	}
+
+	if metadata, ok := obj["metadata"].(map[string]interface{}); ok {
+		metadata["name"] = originalName
+	}
+
+	result, err := json.Marshal(obj)
+	if err != nil {
+		return modifiedString
+	}
+	return string(result)
+}
+
 func (p *RestorePlugin) triggerPodVolumeRestore(modifiedItem *unstructured.Unstructured) error {
 	veleroNamespace := "velero"
 	// Check if the resource is a Pod and trigger podvolumerestore logic
 	if modifiedItem.GetKind() == "Pod" {
 		name := modifiedItem.GetName()
 		labels := modifiedItem.GetLabels()
+		if labels == nil {
+			return fmt.Errorf("pod labels are nil")
+		}
+
+		restoreName, restoreUID := labels["velero.io/restore-name"], labels["velero.io/restore-uid"]
+		if restoreName == "" || restoreUID == "" {
+			return fmt.Errorf("missing restore-name or restore-uid in pod labels")
+		}
 
 		pvrList, err := p.veleroClient.PodVolumeRestores(veleroNamespace).List(context.TODO(), metav1.ListOptions{
-			LabelSelector: fmt.Sprintf("velero.io/restore-name=%s,velero.io/restore-uid=%s", labels["velero.io/restore-name"], labels["velero.io/restore-uid"]),
+			LabelSelector: fmt.Sprintf("velero.io/restore-name=%s,velero.io/restore-uid=%s", restoreName, restoreUID),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to list PodVolumeRestores: %v", err)
