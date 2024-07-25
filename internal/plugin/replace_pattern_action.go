@@ -145,13 +145,13 @@ func replacePatternAction(p *RestorePlugin, input *velero.RestoreItemActionExecu
 }
 
 func (p *RestorePlugin) triggerPodVolumeRestore(modifiedItem *unstructured.Unstructured) error {
+	veleroNamespace := "velero"
 	// Check if the resource is a Pod and trigger podvolumerestore logic
 	if modifiedItem.GetKind() == "Pod" {
-		namespace := modifiedItem.GetNamespace()
 		name := modifiedItem.GetName()
 		labels := modifiedItem.GetLabels()
 
-		pvrList, err := p.veleroClient.PodVolumeRestores(namespace).List(context.TODO(), metav1.ListOptions{
+		pvrList, err := p.veleroClient.PodVolumeRestores(veleroNamespace).List(context.TODO(), metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("velero.io/restore-name=%s,velero.io/restore-uid=%s", labels["velero.io/restore-name"], labels["velero.io/restore-uid"]),
 		})
 		if err != nil {
@@ -162,7 +162,7 @@ func (p *RestorePlugin) triggerPodVolumeRestore(modifiedItem *unstructured.Unstr
 			if pvr.Spec.Pod.Name == name {
 				pvrCopy := pvr.DeepCopy()
 				pvrCopy.Status.Phase = velerov1api.PodVolumeRestorePhaseInProgress
-				_, err := p.veleroClient.PodVolumeRestores(namespace).UpdateStatus(context.TODO(), pvrCopy, metav1.UpdateOptions{})
+				_, err := p.veleroClient.PodVolumeRestores(veleroNamespace).UpdateStatus(context.TODO(), pvrCopy, metav1.UpdateOptions{})
 				if err != nil {
 					return fmt.Errorf("failed to update PodVolumeRestore status: %v", err)
 				}
